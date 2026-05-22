@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Label: unique identifier for this LaunchAgent -->
+  <key>Label</key>
+  <string>com.user.ambientbacklight</string>
+
+  <!-- ProgramArguments: update the path to ambient_backlight.py -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/ambient_backlight.py</string>
+  </array>
+
+  <!-- Run automatically when the user logs in -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart automatically if the process exits -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Optional: redirect stdout/stderr to log files -->
+  <!-- Uncomment and update paths as needed:
+  <key>StandardOutPath</key>
+  <string>/tmp/ambientbacklight.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/ambientbacklight.err.log</string>
+  -->
+</dict>
+</plist>
