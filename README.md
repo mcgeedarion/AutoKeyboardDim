@@ -1,13 +1,14 @@
 # ambient-keyboard-backlight
 
-Automatically adjusts your macOS keyboard backlight based on an approximation of ambient light measured via the built-in webcam.
+Automatically adjusts your macOS keyboard backlight and display brightness based on an approximation of ambient light measured via the built-in webcam.
 
 ## How It Works
 
 1. **Webcam → ambient light**: Captures frames, converts to HSV, and computes mean luminance (V channel) as a 0–1 brightness proxy.
-2. **Set keyboard brightness**: Shells out to `kbrightness` or `mac-brightnessctl` (IOKit-based CLI tools).
-3. **Smoothing**: A rolling average over 5 samples prevents strobing from brief shadows.
-4. **Threshold guard**: Only writes to IOKit when brightness changes by >2%.
+2. **Set keyboard brightness**: Shells out to `kbrightness` or `mac-brightnessctl`.
+3. **Set display brightness**: Shells out to `brightness` (built-in display) or `ddcctl` (external DDC display).
+4. **Smoothing**: A rolling average over 5 samples prevents strobing from brief shadows.
+5. **Threshold guard**: Only writes when brightness changes by >2%.
 
 ## Requirements
 
@@ -19,9 +20,9 @@ Automatically adjusts your macOS keyboard backlight based on an approximation of
 pip install opencv-python numpy
 ```
 
-## Keyboard Brightness Backend
+## Brightness Backends
 
-Install **one** of the following:
+### Keyboard (install one)
 
 ```bash
 # Option 1 — kbrightness
@@ -72,4 +73,15 @@ To stop the service:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.user.ambientbacklight.plist
+```
+
+
+### Screen (install one)
+
+```bash
+# Option 1 — brightness (built-in display)
+brew install brightness
+
+# Option 2 — ddcctl (external DDC display)
+brew install ddcctl
 ```
