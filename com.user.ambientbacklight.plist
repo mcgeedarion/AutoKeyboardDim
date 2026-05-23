@@ -7,11 +7,16 @@
   <key>Label</key>
   <string>com.user.ambientbacklight</string>
 
-  <!-- ProgramArguments: update the path to ambient_backlight.py -->
+  <!--
+    ProgramArguments: path to the compiled Swift binary.
+    Build it first:
+      cd swift && swift build -c release
+    Then update the path below to the resulting binary, e.g.:
+      swift/.build/release/AmbientBacklight
+  -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>/path/to/ambient_backlight.py</string>
+    <string>/path/to/swift/.build/release/AmbientBacklight</string>
   </array>
 
   <!-- Run automatically when the user logs in -->
@@ -22,7 +27,7 @@
   <key>KeepAlive</key>
   <true/>
 
-  <!-- Optional: redirect stdout/stderr to log files -->
+  <!-- Recommended: redirect stdout/stderr to log files -->
   <!-- Uncomment and update paths as needed:
   <key>StandardOutPath</key>
   <string>/tmp/ambientbacklight.out.log</string>

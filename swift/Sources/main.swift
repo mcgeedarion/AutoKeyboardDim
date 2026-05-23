@@ -6,65 +6,49 @@ import CoreVideo
 import IOKit
 import Accelerate
 
-// MARK: - Configuration
+// MARK: - Settings (policy)
 
-let pollIntervalSeconds: Double = 2.0
-let smoothingWindow = 5
-let changeThreshold: Float = 0.02
+struct Settings {
+    let pollIntervalSeconds: TimeInterval = 2.0
+    let smoothingWindow: Int = 5
+    let changeThreshold: Float = 0.02
 
-let keyboardMin: Float = 0.0
-let keyboardMax: Float = 1.0
-let invertKeyboard = true   // dark room -> brighter keyboard
+    let keyboardMin: Float = 0.0
+    let keyboardMax: Float = 1.0
+    let invertKeyboard: Bool = true   // dark room → brighter keyboard
 
-let screenMin: Float = 0.2
-let screenMax: Float = 1.0
-let invertScreen = false    // dark room -> dimmer screen
+    let screenMin: Float = 0.2
+    let screenMax: Float = 1.0
+    let invertScreen: Bool = false    // dark room → dimmer screen
 
-// Privacy / reminder configuration
-let maxCameraRuntimeSeconds: TimeInterval = 60 * 60   // 1 hour default; set 0 to disable auto-stop
-let reminderIntervalSeconds: TimeInterval = 15 * 60   // periodic reminder cadence
+    // Privacy / runtime guard
+    let maxCameraRuntimeSeconds: TimeInterval = 3600   // 0 = unlimited
+    let reminderIntervalSeconds: TimeInterval = 900    // 0 = no reminders
+}
 
-// MARK: - Notification helpers
+let settings = Settings()
+
+// MARK: - Notifications
 
 func configureNotifications() {
     let center = UNUserNotificationCenter.current()
     center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-        if let error = error {
-            fputs("Notification authorization error: \(error.localizedDescription)\n", stderr)
-        }
-        if !granted {
-            fputs("Notification authorization not granted; reminder banners will be disabled.\n", stderr)
-        }
+        if let error { fputs("Notification auth error: \(error.localizedDescription)\n", stderr) }
+        if !granted  { fputs("Notification access not granted; banners disabled.\n", stderr) }
     }
 }
 
-func postCameraActiveNotification() {
+func postNotification(title: String, body: String) {
     let content = UNMutableNotificationContent()
-    content.title = "AutoKeyboardDim"
-    content.body = "Camera is now active to adjust keyboard and screen brightness."
-
+    content.title = title
+    content.body  = body
     let request = UNNotificationRequest(
-        identifier: UUID().uuidString,
-        content: content,
-        trigger: nil
+        identifier: UUID().uuidString, content: content, trigger: nil
     )
     UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
 }
 
-func postReminderNotification() {
-    let content = UNMutableNotificationContent()
-    content.title = "AutoKeyboardDim"
-    content.body = "AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop."
-
-    let request = UNNotificationRequest(
-        identifier: UUID().uuidString,
-        content: content,
-        trigger: nil
-    )
-    UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
-}
-
-// MARK: - Keyboard Brightness Backends (CLI)
+// MARK: - Subprocess safety
 
 let trustedWorkingDirectory = NSHomeDirectory()
 let safePathEntries = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
@@ -72,130 +56,178 @@ let safePathEntries = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
 func resolveExecutable(_ command: String) -> String? {
     let fm = FileManager.default
     for base in safePathEntries {
-        let candidate = URL(fileURLWithPath: base).appendingPathComponent(command).path
+        let candidate = URL(fileURLWithPath: base)
+            .appendingPathComponent(command).path
         if fm.isExecutableFile(atPath: candidate) {
-            return URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
+            return URL(fileURLWithPath: candidate)
+                .resolvingSymlinksInPath().path
         }
     }
-    return nil
-}
-
-struct KeyboardBackend {
-    let name: String
-    let executablePath: String
-    let commandBuilder: (Float) -> [String]
-}
-
-func detectKeyboardBackend() -> KeyboardBackend? {
-    if let path = resolveExecutable("kbrightness") {
-        print("Using keyboard backend: kbrightness (\(path))")
-        return KeyboardBackend(name: "kbrightness", executablePath: path) { value in
-            [String(format: "%.3f", value)]
-        }
-    }
-
-    if let path = resolveExecutable("mac-brightnessctl") {
-        print("Using keyboard backend: mac-brightnessctl (\(path))")
-        return KeyboardBackend(name: "mac-brightnessctl", executablePath: path) { value in
-            [String(Int(value * 100))]
-        }
-    }
-
-    fputs("Warning: No keyboard backend found (kbrightness/mac-brightnessctl). Keyboard control disabled.\n", stderr)
     return nil
 }
 
 func sanitizedEnvironment() -> [String: String] {
     var env: [String: String] = [:]
     let current = ProcessInfo.processInfo.environment
-
     for key in ["LANG", "LC_ALL", "LC_CTYPE", "HOME"] {
         if let v = current[key] { env[key] = v }
     }
-
     env["PATH"] = safePathEntries.joined(separator: ":")
-
     for key in ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONPATH"] {
         env.removeValue(forKey: key)
     }
-
     return env
 }
 
-func setKeyboardBrightness(_ value: Float, backend: KeyboardBackend?) {
-    guard let backend else { return }
-    let clamped = min(max(value, keyboardMin), keyboardMax)
-    let ok = runCommand(executablePath: backend.executablePath, arguments: backend.commandBuilder(clamped))
-    if !ok {
-        fputs("Warning: failed to set keyboard brightness via \(backend.name)\n", stderr)
+/// Single entry-point for all subprocess invocations.
+/// Always uses the hardened cwd + sanitized environment.
+struct ProcessLauncher {
+    private let cwd = URL(fileURLWithPath: trustedWorkingDirectory)
+    private let env = sanitizedEnvironment()
+
+    @discardableResult
+    func run(executablePath: String, arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL      = URL(fileURLWithPath: executablePath)
+        process.arguments          = arguments
+        process.currentDirectoryURL = cwd
+        process.environment        = env
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            fputs("Warning: \(executablePath) \(arguments.joined(separator: " ")): "
+                  + "\(error.localizedDescription)\n", stderr)
+            return false
+        }
     }
 }
 
-// MARK: - Screen Brightness Backends (CLI)
+let launcher = ProcessLauncher()
 
-struct ScreenBackend {
+// MARK: - Unified brightness backend
+
+enum BackendKind { case keyboard, screen }
+
+struct BrightnessBackend {
+    let kind: BackendKind
     let name: String
     let executablePath: String
     let commandBuilder: (Float) -> [String]
+    let outMin: Float
+    let outMax: Float
+
+    func clamped(_ value: Float) -> Float {
+        min(max(value, outMin), outMax)
+    }
+
+    func set(_ value: Float) {
+        let v = clamped(value)
+        let ok = launcher.run(executablePath: executablePath,
+                               arguments: commandBuilder(v))
+        if !ok {
+            fputs("Warning: failed to set \(kind) brightness via \(name)\n", stderr)
+        }
+    }
 }
 
-func detectScreenBackend() -> ScreenBackend? {
-    if let path = resolveExecutable("brightness") {
-        print("Using screen backend: brightness (\(path))")
-        return ScreenBackend(name: "brightness", executablePath: path) { value in
-            ["-l", String(format: "%.3f", value)]
-        }
+func detectBackend(kind: BackendKind) -> BrightnessBackend? {
+    let candidates: [(name: String, builder: (Float) -> [String], min: Float, max: Float)]
+    switch kind {
+    case .keyboard:
+        candidates = [
+            ("kbrightness",       { v in [String(format: "%.3f", v)] },          0.0, 1.0),
+            ("mac-brightnessctl", { v in [String(Int(v * 100))] },               0.0, 1.0),
+        ]
+    case .screen:
+        candidates = [
+            ("brightness", { v in ["-l", String(format: "%.3f", v)] },           0.0, 1.0),
+            ("ddcctl",     { v in ["-b", String(Int(v * 100))] },                0.0, 1.0),
+        ]
     }
 
-    if let path = resolveExecutable("ddcctl") {
-        print("Using screen backend: ddcctl (\(path))")
-        return ScreenBackend(name: "ddcctl", executablePath: path) { value in
-            ["-b", String(Int(value * 100))]
+    for c in candidates {
+        if let path = resolveExecutable(c.name) {
+            print("Using \(kind) backend: \(c.name) (\(path))")
+            return BrightnessBackend(
+                kind: kind, name: c.name, executablePath: path,
+                commandBuilder: c.builder, outMin: c.min, outMax: c.max
+            )
         }
     }
-
-    fputs("Warning: No screen backend found (brightness/ddcctl). Screen control disabled.\n", stderr)
+    fputs("Warning: no \(kind) backend found. \(kind) control disabled.\n", stderr)
     return nil
 }
 
-@discardableResult
-func runCommand(executablePath: String, arguments: [String]) -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: executablePath)
-    process.arguments = arguments
-    process.currentDirectoryURL = URL(fileURLWithPath: trustedWorkingDirectory)
-    process.environment = sanitizedEnvironment()
+// MARK: - Pure control policy
 
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
-        fputs("Warning: failed to run \(executablePath) \(arguments.joined(separator: " ")): \(error.localizedDescription)\n", stderr)
-        return false
+func mapAmbient(_ ambient: Float, minValue: Float, maxValue: Float, invert: Bool) -> Float {
+    invert ? maxValue - ambient * (maxValue - minValue)
+           : minValue + ambient * (maxValue - minValue)
+}
+
+/// Pure – no I/O. Returns nil for each target when change is below threshold.
+func computeTargets(
+    history: inout [Float],
+    ambientNow: Float,
+    lastKeyboard: Float,
+    lastScreen: Float,
+    s: Settings
+) -> (keyboard: Float?, screen: Float?) {
+    history.append(ambientNow)
+    if history.count > s.smoothingWindow { history.removeFirst() }
+    let smoothed = history.reduce(0, +) / Float(history.count)
+
+    let kbd = mapAmbient(smoothed, minValue: s.keyboardMin, maxValue: s.keyboardMax, invert: s.invertKeyboard)
+    let scr = mapAmbient(smoothed, minValue: s.screenMin,   maxValue: s.screenMax,   invert: s.invertScreen)
+
+    return (
+        abs(kbd - lastKeyboard) > s.changeThreshold ? kbd : nil,
+        abs(scr - lastScreen)   > s.changeThreshold ? scr : nil
+    )
+}
+
+// MARK: - Runtime guard
+
+final class RuntimeGuard {
+    private let maxRuntime: TimeInterval
+    private let reminderInterval: TimeInterval
+    private let start = Date()
+    private var lastReminder = Date()
+
+    init(s: Settings) {
+        maxRuntime       = s.maxCameraRuntimeSeconds
+        reminderInterval = s.reminderIntervalSeconds
+    }
+
+    var shouldExit: Bool {
+        maxRuntime > 0 && Date().timeIntervalSince(start) >= maxRuntime
+    }
+
+    func maybeRemind() {
+        guard reminderInterval > 0,
+              Date().timeIntervalSince(lastReminder) >= reminderInterval
+        else { return }
+        postNotification(
+            title: "AutoKeyboardDim",
+            body: "Camera is active. Press Ctrl+C to stop."
+        )
+        lastReminder = Date()
     }
 }
 
-func setScreenBrightness(_ value: Float, backend: ScreenBackend?) {
-    guard let backend else { return }
-    let clamped = min(max(value, 0.0), 1.0)
-    let ok = runCommand(executablePath: backend.executablePath, arguments: backend.commandBuilder(clamped))
-    if !ok {
-        fputs("Warning: failed to set screen brightness via \(backend.name)\n", stderr)
-    }
-}
-
-// MARK: - Webcam Brightness Sampling
+// MARK: - Webcam sampling
 
 final class BrightnessSampler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "com.ambientbacklight.camera", qos: .utility)
-    private var latestBrightness: Float = 0.5
+    private let queue   = DispatchQueue(label: "com.ambientbacklight.camera", qos: .utility)
+    private var _brightness: Float = 0.5
     private let lock = NSLock()
 
     var currentBrightness: Float {
         lock.lock(); defer { lock.unlock() }
-        return latestBrightness
+        return _brightness
     }
 
     func start() throws {
@@ -242,57 +274,48 @@ final class BrightnessSampler: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
         guard let lumaBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return }
-
         let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
-        let count = height * stride
+        let count  = height * stride
 
         var floatBuf = [Float](repeating: 0, count: count)
         vDSP_vfltu8(lumaBase.assumingMemoryBound(to: UInt8.self), 1, &floatBuf, 1, vDSP_Length(count))
-
         var mean: Float = 0
         vDSP_meanv(floatBuf, 1, &mean, vDSP_Length(count))
 
         lock.lock()
-        latestBrightness = mean / 255.0
+        _brightness = mean / 255.0
         lock.unlock()
     }
 }
 
-func mapAmbient(_ ambient: Float, minValue: Float, maxValue: Float, invert: Bool) -> Float {
-    if invert {
-        return maxValue - ambient * (maxValue - minValue)
-    }
-    return minValue + ambient * (maxValue - minValue)
-}
+// MARK: - Entry point
 
-// MARK: - Entry Point
+configureNotifications()
 
-let keyboardBackend = detectKeyboardBackend()
-let screenBackend = detectScreenBackend()
+let keyboardBackend = detectBackend(kind: .keyboard)
+let screenBackend   = detectBackend(kind: .screen)
 
 if keyboardBackend == nil && screenBackend == nil {
-    fputs("Error: no output backends available. Install keyboard and/or screen brightness control tools.\n", stderr)
+    fputs("Error: no output backends available. Install keyboard/screen brightness tools.\n", stderr)
     exit(1)
 }
 
+// Request camera permission
 let semaphore = DispatchSemaphore(value: 0)
 AVCaptureDevice.requestAccess(for: .video) { granted in
     if !granted {
-        fputs("Camera access denied. Grant access in:\nSystem Settings → Privacy & Security → Camera\n", stderr)
+        fputs("Camera access denied.\nSystem Settings → Privacy & Security → Camera\n", stderr)
     }
     semaphore.signal()
 }
 semaphore.wait()
 
-if AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
-    exit(1)
-}
+guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { exit(1) }
 
 let sampler = BrightnessSampler()
 do {
@@ -302,44 +325,61 @@ do {
     exit(1)
 }
 
-var history = [Float]()
-var lastKeyboard: Float = -1.0
-var lastScreen: Float = -1.0
+postNotification(
+    title: "AutoKeyboardDim",
+    body: "Camera is now active to adjust keyboard and screen brightness."
+)
 
+var history   = [Float]()
+var lastKeyboard: Float = -1.0
+var lastScreen:   Float = -1.0
+let guard_ = RuntimeGuard(s: settings)
+
+// Graceful shutdown on Ctrl+C
 let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 signal(SIGINT, SIG_IGN)
 sigSrc.setEventHandler {
     print("\nRestoring defaults…")
-    if keyboardBackend != nil { setKeyboardBrightness(0.5, backend: keyboardBackend) }
-    if screenBackend != nil { setScreenBrightness(0.7, backend: screenBackend) }
+    keyboardBackend?.set(0.5)
+    screenBackend?.set(0.7)
     sampler.stop()
     exit(0)
 }
 sigSrc.resume()
 
 print("Ambient backlight running (camera active). Press Ctrl+C to stop.\n")
-+postCameraActiveNotification()
-+
- let startTime = Date()
- var lastReminderTime = Date()
- 
- while true {
-@@
--    // Optional periodic reminder while camera is active
--    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
--        print("[Reminder] AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop.")
--        lastReminderTime = now
--    }
-+    // Optional periodic Notification Center reminder while camera is active
-+    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
-+        postReminderNotification()
-+        lastReminderTime = now
-+    }
-@@
-     print(String(format: "Ambient: %.3f → Keyboard: %.0f%% | Screen: %.0f%%",
-                  smoothed,
-                  keyboardTarget * 100,
-                  screenTarget * 100))
- 
-     Thread.sleep(forTimeInterval: pollIntervalSeconds)
- }
+
+while true {
+    if guard_.shouldExit {
+        print("Max runtime reached. Stopping.")
+        keyboardBackend?.set(0.5)
+        screenBackend?.set(0.7)
+        sampler.stop()
+        break
+    }
+    guard_.maybeRemind()
+
+    let ambientNow = sampler.currentBrightness
+    let (newKbd, newScr) = computeTargets(
+        history: &history,
+        ambientNow: ambientNow,
+        lastKeyboard: lastKeyboard,
+        lastScreen: lastScreen,
+        s: settings
+    )
+
+    if let v = newKbd {
+        keyboardBackend?.set(v)
+        lastKeyboard = v
+    }
+    if let v = newScr {
+        screenBackend?.set(v)
+        lastScreen = v
+    }
+
+    let smoothed = history.isEmpty ? ambientNow : history.reduce(0, +) / Float(history.count)
+    print(String(format: "Ambient: %.3f → Keyboard: %.0f%% | Screen: %.0f%%",
+                 smoothed, lastKeyboard * 100, lastScreen * 100))
+
+    Thread.sleep(forTimeInterval: settings.pollIntervalSeconds)
+}
