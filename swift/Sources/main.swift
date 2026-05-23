@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import UserNotifications
 import CoreVideo
 import IOKit
 import Accelerate
@@ -22,6 +23,46 @@ let invertScreen = false    // dark room -> dimmer screen
 // Privacy / reminder configuration
 let maxCameraRuntimeSeconds: TimeInterval = 60 * 60   // 1 hour default; set 0 to disable auto-stop
 let reminderIntervalSeconds: TimeInterval = 15 * 60   // periodic reminder cadence
+
+// MARK: - Notification helpers
+
+func configureNotifications() {
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+        if let error = error {
+            fputs("Notification authorization error: \(error.localizedDescription)\n", stderr)
+        }
+        if !granted {
+            fputs("Notification authorization not granted; reminder banners will be disabled.\n", stderr)
+        }
+    }
+}
+
+func postCameraActiveNotification() {
+    let content = UNMutableNotificationContent()
+    content.title = "AutoKeyboardDim"
+    content.body = "Camera is now active to adjust keyboard and screen brightness."
+
+    let request = UNNotificationRequest(
+        identifier: UUID().uuidString,
+        content: content,
+        trigger: nil
+    )
+    UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+}
+
+func postReminderNotification() {
+    let content = UNMutableNotificationContent()
+    content.title = "AutoKeyboardDim"
+    content.body = "AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop."
+
+    let request = UNNotificationRequest(
+        identifier: UUID().uuidString,
+        content: content,
+        trigger: nil
+    )
+    UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+}
 
 // MARK: - Keyboard Brightness Backends (CLI)
 
@@ -277,50 +318,28 @@ sigSrc.setEventHandler {
 sigSrc.resume()
 
 print("Ambient backlight running (camera active). Press Ctrl+C to stop.\n")
-
-let startTime = Date()
-var lastReminderTime = Date()
-
-while true {
-    let now = Date()
-
-    // Enforce optional max runtime
-    if maxCameraRuntimeSeconds > 0 && now.timeIntervalSince(startTime) >= maxCameraRuntimeSeconds {
-        print("Max camera runtime reached (\(Int(maxCameraRuntimeSeconds)) s). Stopping.")
-        if keyboardBackend != nil { setKeyboardBrightness(0.5, backend: keyboardBackend) }
-        if screenBackend != nil { setScreenBrightness(0.7, backend: screenBackend) }
-        sampler.stop()
-        exit(0)
-    }
-
-    // Optional periodic reminder while camera is active
-    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
-        print("[Reminder] AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop.")
-        lastReminderTime = now
-    }
-
-    let ambient = sampler.currentBrightness
-    history.append(ambient)
-    if history.count > smoothingWindow { history.removeFirst() }
-
-    let smoothed = history.reduce(0, +) / Float(history.count)
-    let keyboardTarget = mapAmbient(smoothed, minValue: keyboardMin, maxValue: keyboardMax, invert: invertKeyboard)
-    let screenTarget = mapAmbient(smoothed, minValue: screenMin, maxValue: screenMax, invert: invertScreen)
-
-    if keyboardBackend != nil && abs(keyboardTarget - lastKeyboard) > changeThreshold {
-        setKeyboardBrightness(keyboardTarget, backend: keyboardBackend)
-        lastKeyboard = keyboardTarget
-    }
-
-    if screenBackend != nil && abs(screenTarget - lastScreen) > changeThreshold {
-        setScreenBrightness(screenTarget, backend: screenBackend)
-        lastScreen = screenTarget
-    }
-
-    print(String(format: "Ambient: %.3f → Keyboard: %.0f%% | Screen: %.0f%%",
-                 smoothed,
-                 keyboardTarget * 100,
-                 screenTarget * 100))
-
-    Thread.sleep(forTimeInterval: pollIntervalSeconds)
-}
++postCameraActiveNotification()
++
+ let startTime = Date()
+ var lastReminderTime = Date()
+ 
+ while true {
+@@
+-    // Optional periodic reminder while camera is active
+-    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
+-        print("[Reminder] AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop.")
+-        lastReminderTime = now
+-    }
++    // Optional periodic Notification Center reminder while camera is active
++    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
++        postReminderNotification()
++        lastReminderTime = now
++    }
+@@
+     print(String(format: "Ambient: %.3f → Keyboard: %.0f%% | Screen: %.0f%%",
+                  smoothed,
+                  keyboardTarget * 100,
+                  screenTarget * 100))
+ 
+     Thread.sleep(forTimeInterval: pollIntervalSeconds)
+ }
