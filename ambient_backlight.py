@@ -76,6 +76,7 @@ TRUSTED_CWD = os.path.expanduser("~")
 
 
 def _resolve_executable(name: str) -> Optional[str]:
+    """Resolve a helper by name to an absolute path under SAFE_EXEC_DIRS only."""
     resolved = shutil.which(name, path=SAFE_ENV["PATH"])
     if not resolved:
         return None

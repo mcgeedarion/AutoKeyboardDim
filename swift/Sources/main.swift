@@ -19,6 +19,10 @@ let screenMin: Float = 0.2
 let screenMax: Float = 1.0
 let invertScreen = false    // dark room -> dimmer screen
 
+// Privacy / reminder configuration
+let maxCameraRuntimeSeconds: TimeInterval = 60 * 60   // 1 hour default; set 0 to disable auto-stop
+let reminderIntervalSeconds: TimeInterval = 15 * 60   // periodic reminder cadence
+
 // MARK: - Keyboard Brightness Backends (CLI)
 
 let trustedWorkingDirectory = NSHomeDirectory()
@@ -58,6 +62,23 @@ func detectKeyboardBackend() -> KeyboardBackend? {
 
     fputs("Warning: No keyboard backend found (kbrightness/mac-brightnessctl). Keyboard control disabled.\n", stderr)
     return nil
+}
+
+func sanitizedEnvironment() -> [String: String] {
+    var env: [String: String] = [:]
+    let current = ProcessInfo.processInfo.environment
+
+    for key in ["LANG", "LC_ALL", "LC_CTYPE", "HOME"] {
+        if let v = current[key] { env[key] = v }
+    }
+
+    env["PATH"] = safePathEntries.joined(separator: ":")
+
+    for key in ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONPATH"] {
+        env.removeValue(forKey: key)
+    }
+
+    return env
 }
 
 func setKeyboardBrightness(_ value: Float, backend: KeyboardBackend?) {
@@ -102,7 +123,7 @@ func runCommand(executablePath: String, arguments: [String]) -> Bool {
     process.executableURL = URL(fileURLWithPath: executablePath)
     process.arguments = arguments
     process.currentDirectoryURL = URL(fileURLWithPath: trustedWorkingDirectory)
-    process.environment = ["PATH": safePathEntries.joined(separator: ":"), "HOME": NSHomeDirectory()]
+    process.environment = sanitizedEnvironment()
 
     do {
         try process.run()
@@ -257,7 +278,27 @@ sigSrc.resume()
 
 print("Ambient backlight running (camera active). Press Ctrl+C to stop.\n")
 
+let startTime = Date()
+var lastReminderTime = Date()
+
 while true {
+    let now = Date()
+
+    // Enforce optional max runtime
+    if maxCameraRuntimeSeconds > 0 && now.timeIntervalSince(startTime) >= maxCameraRuntimeSeconds {
+        print("Max camera runtime reached (\(Int(maxCameraRuntimeSeconds)) s). Stopping.")
+        if keyboardBackend != nil { setKeyboardBrightness(0.5, backend: keyboardBackend) }
+        if screenBackend != nil { setScreenBrightness(0.7, backend: screenBackend) }
+        sampler.stop()
+        exit(0)
+    }
+
+    // Optional periodic reminder while camera is active
+    if reminderIntervalSeconds > 0 && now.timeIntervalSince(lastReminderTime) >= reminderIntervalSeconds {
+        print("[Reminder] AutoKeyboardDim is currently using the camera to adjust keyboard brightness. Press Ctrl+C to stop.")
+        lastReminderTime = now
+    }
+
     let ambient = sampler.currentBrightness
     history.append(ambient)
     if history.count > smoothingWindow { history.removeFirst() }
