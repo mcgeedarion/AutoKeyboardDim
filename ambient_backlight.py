@@ -30,6 +30,8 @@ import sys
 from dataclasses import dataclass
 from collections import deque
 from typing import Callable, Optional
+import os
+import shutil
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ INVERT_SCREEN = False
 @dataclass
 class BrightnessBackend:
     name: str
+    executable: str
     setter: Callable[[float], list[str]]
     min_value: float
     max_value: float
@@ -67,20 +70,35 @@ class BrightnessBackend:
         return float(np.clip(value, self.min_value, self.max_value))
 
 
-def _which(name: str) -> bool:
-    import shutil
+SAFE_EXEC_DIRS = ("/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
+SAFE_ENV = {"PATH": ":".join(SAFE_EXEC_DIRS), "HOME": os.path.expanduser("~")}
+TRUSTED_CWD = os.path.expanduser("~")
 
-    return bool(shutil.which(name))
+
+def _resolve_executable(name: str) -> Optional[str]:
+    resolved = shutil.which(name, path=SAFE_ENV["PATH"])
+    if not resolved:
+        return None
+
+    real = os.path.realpath(resolved)
+    if any(real.startswith(prefix + os.sep) or real == prefix for prefix in SAFE_EXEC_DIRS):
+        return real
+
+    log.warning("Ignoring unsafe executable path for %s: %s", name, real)
+    return None
+
 
 
 def detect_keyboard_backend() -> Optional[BrightnessBackend]:
     candidates = [
-        BrightnessBackend("kbrightness", lambda v: ["kbrightness", f"{v:.3f}"], 0.0, 1.0),
-        BrightnessBackend("mac-brightnessctl", lambda v: ["mac-brightnessctl", str(int(v * 100))], 0.0, 1.0),
+        BrightnessBackend("kbrightness", "", lambda v: [f"{v:.3f}"], 0.0, 1.0),
+        BrightnessBackend("mac-brightnessctl", "", lambda v: [str(int(v * 100))], 0.0, 1.0),
     ]
     for backend in candidates:
-        if _which(backend.name):
-            log.info("Using keyboard backend: %s", backend.name)
+        resolved = _resolve_executable(backend.name)
+        if resolved:
+            log.info("Using keyboard backend: %s (%s)", backend.name, resolved)
+            backend.executable = resolved
             return backend
     log.warning("No keyboard backend found (kbrightness/mac-brightnessctl). Keyboard control disabled.")
     return None
@@ -88,12 +106,14 @@ def detect_keyboard_backend() -> Optional[BrightnessBackend]:
 
 def detect_screen_backend() -> Optional[BrightnessBackend]:
     candidates = [
-        BrightnessBackend("brightness", lambda v: ["brightness", "-l", f"{v:.3f}"], 0.0, 1.0),
-        BrightnessBackend("ddcctl", lambda v: ["ddcctl", "-b", str(int(v * 100))], 0.0, 1.0),
+        BrightnessBackend("brightness", "", lambda v: ["-l", f"{v:.3f}"], 0.0, 1.0),
+        BrightnessBackend("ddcctl", "", lambda v: ["-b", str(int(v * 100))], 0.0, 1.0),
     ]
     for backend in candidates:
-        if _which(backend.name):
-            log.info("Using screen backend: %s", backend.name)
+        resolved = _resolve_executable(backend.name)
+        if resolved:
+            log.info("Using screen backend: %s (%s)", backend.name, resolved)
+            backend.executable = resolved
             return backend
     log.warning("No screen backend found (brightness/ddcctl). Screen control disabled.")
     return None
@@ -101,9 +121,9 @@ def detect_screen_backend() -> Optional[BrightnessBackend]:
 
 def run_backend(backend: BrightnessBackend, value: float, label: str) -> None:
     clamped = backend.clamp(value)
-    cmd = backend.setter(clamped)
+    cmd = [backend.executable] + backend.setter(clamped)
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, cwd=TRUSTED_CWD, env=SAFE_ENV)
         log.debug("Set %s via %s -> %.3f", label, backend.name, clamped)
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode(errors="ignore").strip()
@@ -152,7 +172,7 @@ def run():
     last_keyboard = -1.0
     last_screen = -1.0
 
-    log.info("Starting ambient loop. Ctrl+C to stop.")
+    log.info("Starting ambient loop. Ctrl+C to stop. Camera is active.")
     try:
         while True:
             ambient = capture_mean_brightness(cap, CAPTURE_FRAMES)

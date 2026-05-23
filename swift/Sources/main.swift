@@ -21,23 +21,38 @@ let invertScreen = false    // dark room -> dimmer screen
 
 // MARK: - Keyboard Brightness Backends (CLI)
 
+let trustedWorkingDirectory = NSHomeDirectory()
+let safePathEntries = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+
+func resolveExecutable(_ command: String) -> String? {
+    let fm = FileManager.default
+    for base in safePathEntries {
+        let candidate = URL(fileURLWithPath: base).appendingPathComponent(command).path
+        if fm.isExecutableFile(atPath: candidate) {
+            return URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
+        }
+    }
+    return nil
+}
+
 struct KeyboardBackend {
     let name: String
+    let executablePath: String
     let commandBuilder: (Float) -> [String]
 }
 
 func detectKeyboardBackend() -> KeyboardBackend? {
-    if commandExists("kbrightness") {
-        print("Using keyboard backend: kbrightness")
-        return KeyboardBackend(name: "kbrightness") { value in
-            ["kbrightness", String(format: "%.3f", value)]
+    if let path = resolveExecutable("kbrightness") {
+        print("Using keyboard backend: kbrightness (\(path))")
+        return KeyboardBackend(name: "kbrightness", executablePath: path) { value in
+            [String(format: "%.3f", value)]
         }
     }
 
-    if commandExists("mac-brightnessctl") {
-        print("Using keyboard backend: mac-brightnessctl")
-        return KeyboardBackend(name: "mac-brightnessctl") { value in
-            ["mac-brightnessctl", String(Int(value * 100))]
+    if let path = resolveExecutable("mac-brightnessctl") {
+        print("Using keyboard backend: mac-brightnessctl (\(path))")
+        return KeyboardBackend(name: "mac-brightnessctl", executablePath: path) { value in
+            [String(Int(value * 100))]
         }
     }
 
@@ -48,7 +63,7 @@ func detectKeyboardBackend() -> KeyboardBackend? {
 func setKeyboardBrightness(_ value: Float, backend: KeyboardBackend?) {
     guard let backend else { return }
     let clamped = min(max(value, keyboardMin), keyboardMax)
-    let ok = runCommand(backend.commandBuilder(clamped))
+    let ok = runCommand(executablePath: backend.executablePath, arguments: backend.commandBuilder(clamped))
     if !ok {
         fputs("Warning: failed to set keyboard brightness via \(backend.name)\n", stderr)
     }
@@ -58,34 +73,22 @@ func setKeyboardBrightness(_ value: Float, backend: KeyboardBackend?) {
 
 struct ScreenBackend {
     let name: String
+    let executablePath: String
     let commandBuilder: (Float) -> [String]
 }
 
-func commandExists(_ command: String) -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-    process.arguments = [command]
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
-        return false
-    }
-}
-
 func detectScreenBackend() -> ScreenBackend? {
-    if commandExists("brightness") {
-        print("Using screen backend: brightness")
-        return ScreenBackend(name: "brightness") { value in
-            ["brightness", "-l", String(format: "%.3f", value)]
+    if let path = resolveExecutable("brightness") {
+        print("Using screen backend: brightness (\(path))")
+        return ScreenBackend(name: "brightness", executablePath: path) { value in
+            ["-l", String(format: "%.3f", value)]
         }
     }
 
-    if commandExists("ddcctl") {
-        print("Using screen backend: ddcctl")
-        return ScreenBackend(name: "ddcctl") { value in
-            ["ddcctl", "-b", String(Int(value * 100))]
+    if let path = resolveExecutable("ddcctl") {
+        print("Using screen backend: ddcctl (\(path))")
+        return ScreenBackend(name: "ddcctl", executablePath: path) { value in
+            ["-b", String(Int(value * 100))]
         }
     }
 
@@ -94,18 +97,19 @@ func detectScreenBackend() -> ScreenBackend? {
 }
 
 @discardableResult
-func runCommand(_ args: [String]) -> Bool {
-    guard let executable = args.first else { return false }
+func runCommand(executablePath: String, arguments: [String]) -> Bool {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = [executable] + args.dropFirst()
+    process.executableURL = URL(fileURLWithPath: executablePath)
+    process.arguments = arguments
+    process.currentDirectoryURL = URL(fileURLWithPath: trustedWorkingDirectory)
+    process.environment = ["PATH": safePathEntries.joined(separator: ":"), "HOME": NSHomeDirectory()]
 
     do {
         try process.run()
         process.waitUntilExit()
         return process.terminationStatus == 0
     } catch {
-        fputs("Warning: failed to run \(args.joined(separator: " ")): \(error.localizedDescription)\n", stderr)
+        fputs("Warning: failed to run \(executablePath) \(arguments.joined(separator: " ")): \(error.localizedDescription)\n", stderr)
         return false
     }
 }
@@ -113,7 +117,7 @@ func runCommand(_ args: [String]) -> Bool {
 func setScreenBrightness(_ value: Float, backend: ScreenBackend?) {
     guard let backend else { return }
     let clamped = min(max(value, 0.0), 1.0)
-    let ok = runCommand(backend.commandBuilder(clamped))
+    let ok = runCommand(executablePath: backend.executablePath, arguments: backend.commandBuilder(clamped))
     if !ok {
         fputs("Warning: failed to set screen brightness via \(backend.name)\n", stderr)
     }
@@ -251,7 +255,7 @@ sigSrc.setEventHandler {
 }
 sigSrc.resume()
 
-print("Ambient backlight running. Press Ctrl+C to stop.\n")
+print("Ambient backlight running (camera active). Press Ctrl+C to stop.\n")
 
 while true {
     let ambient = sampler.currentBrightness
