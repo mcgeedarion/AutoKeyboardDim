@@ -3,7 +3,6 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import IOKit
-import IOKit.hid
 import Accelerate
 
 // MARK: - Configuration
@@ -20,49 +19,38 @@ let screenMin: Float = 0.2
 let screenMax: Float = 1.0
 let invertScreen = false    // dark room -> dimmer screen
 
-// MARK: - IOKit Keyboard Backlight
+// MARK: - Keyboard Brightness Backends (CLI)
 
-private var ioService: io_service_t = IO_OBJECT_NULL
-private var ioConnect: io_connect_t = IO_OBJECT_NULL
-private let kSetLEDBrightness: UInt32 = 1
-
-func openIOKitConnection() -> Bool {
-    ioService = IOServiceGetMatchingService(
-        kIOMainPortDefault,
-        IOServiceMatching("AppleLMUController")
-    )
-    guard ioService != IO_OBJECT_NULL else {
-        fputs("Warning: AppleLMUController not found. Keyboard control disabled.\n", stderr)
-        return false
-    }
-    let kr = IOServiceOpen(ioService, mach_task_self_, 0, &ioConnect)
-    guard kr == KERN_SUCCESS else {
-        fputs("Warning: IOServiceOpen failed (\(kr)). Keyboard control disabled.\n", stderr)
-        return false
-    }
-    return true
+struct KeyboardBackend {
+    let name: String
+    let commandBuilder: (Float) -> [String]
 }
 
-func closeIOKitConnection() {
-    if ioConnect != IO_OBJECT_NULL { IOServiceClose(ioConnect) }
-    if ioService != IO_OBJECT_NULL { IOObjectRelease(ioService) }
+func detectKeyboardBackend() -> KeyboardBackend? {
+    if commandExists("kbrightness") {
+        print("Using keyboard backend: kbrightness")
+        return KeyboardBackend(name: "kbrightness") { value in
+            ["kbrightness", String(format: "%.3f", value)]
+        }
+    }
+
+    if commandExists("mac-brightnessctl") {
+        print("Using keyboard backend: mac-brightnessctl")
+        return KeyboardBackend(name: "mac-brightnessctl") { value in
+            ["mac-brightnessctl", String(Int(value * 100))]
+        }
+    }
+
+    fputs("Warning: No keyboard backend found (kbrightness/mac-brightnessctl). Keyboard control disabled.\n", stderr)
+    return nil
 }
 
-func setKeyboardBrightness(_ value: Float) {
-    guard ioConnect != IO_OBJECT_NULL else { return }
+func setKeyboardBrightness(_ value: Float, backend: KeyboardBackend?) {
+    guard let backend else { return }
     let clamped = min(max(value, keyboardMin), keyboardMax)
-    var input = UInt64(clamped * 0xfff)
-    var output = UInt64(0)
-    var outputCount: UInt32 = 1
-
-    let kr = IOConnectCallScalarMethod(
-        ioConnect,
-        kSetLEDBrightness,
-        &input, 1,
-        &output, &outputCount
-    )
-    if kr != KERN_SUCCESS {
-        fputs("Warning: Failed to set keyboard brightness (\(kr))\n", stderr)
+    let ok = runCommand(backend.commandBuilder(clamped))
+    if !ok {
+        fputs("Warning: failed to set keyboard brightness via \(backend.name)\n", stderr)
     }
 }
 
@@ -219,10 +207,10 @@ func mapAmbient(_ ambient: Float, minValue: Float, maxValue: Float, invert: Bool
 
 // MARK: - Entry Point
 
-let keyboardEnabled = openIOKitConnection()
+let keyboardBackend = detectKeyboardBackend()
 let screenBackend = detectScreenBackend()
 
-if !keyboardEnabled && screenBackend == nil {
+if keyboardBackend == nil && screenBackend == nil {
     fputs("Error: no output backends available. Install keyboard and/or screen brightness control tools.\n", stderr)
     exit(1)
 }
@@ -231,11 +219,14 @@ let semaphore = DispatchSemaphore(value: 0)
 AVCaptureDevice.requestAccess(for: .video) { granted in
     if !granted {
         fputs("Camera access denied. Grant access in:\nSystem Settings → Privacy & Security → Camera\n", stderr)
-        exit(1)
     }
     semaphore.signal()
 }
 semaphore.wait()
+
+if AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
+    exit(1)
+}
 
 let sampler = BrightnessSampler()
 do {
@@ -253,10 +244,9 @@ let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 signal(SIGINT, SIG_IGN)
 sigSrc.setEventHandler {
     print("\nRestoring defaults…")
-    if keyboardEnabled { setKeyboardBrightness(0.5) }
+    if keyboardBackend != nil { setKeyboardBrightness(0.5, backend: keyboardBackend) }
     if screenBackend != nil { setScreenBrightness(0.7, backend: screenBackend) }
     sampler.stop()
-    closeIOKitConnection()
     exit(0)
 }
 sigSrc.resume()
@@ -272,8 +262,8 @@ while true {
     let keyboardTarget = mapAmbient(smoothed, minValue: keyboardMin, maxValue: keyboardMax, invert: invertKeyboard)
     let screenTarget = mapAmbient(smoothed, minValue: screenMin, maxValue: screenMax, invert: invertScreen)
 
-    if keyboardEnabled && abs(keyboardTarget - lastKeyboard) > changeThreshold {
-        setKeyboardBrightness(keyboardTarget)
+    if keyboardBackend != nil && abs(keyboardTarget - lastKeyboard) > changeThreshold {
+        setKeyboardBrightness(keyboardTarget, backend: keyboardBackend)
         lastKeyboard = keyboardTarget
     }
 
