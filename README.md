@@ -54,9 +54,12 @@ Edit the constants at the top of `ambient_backlight.py`:
 |---|---|---|
 | `POLL_INTERVAL_SEC` | `2.0` | Seconds between webcam samples |
 | `SMOOTHING_WINDOW` | `5` | Rolling average window size |
-| `BRIGHTNESS_MIN` | `0.0` | Minimum keyboard brightness |
-| `BRIGHTNESS_MAX` | `1.0` | Maximum keyboard brightness |
-| `INVERT` | `True` | Dark room → full backlight, bright room → dim |
+| `KEYBOARD_MIN` | `0.0` | Minimum keyboard brightness |
+| `KEYBOARD_MAX` | `1.0` | Maximum keyboard brightness |
+| `SCREEN_MIN` | `0.2` | Minimum screen brightness |
+| `SCREEN_MAX` | `1.0` | Maximum screen brightness |
+| `INVERT_KEYBOARD` | `True` | Dark room → brighter keyboard |
+| `INVERT_SCREEN` | `False` | Dark room → dimmer screen |
 | `CAMERA_INDEX` | `0` | Webcam index (0 = built-in) |
 
 ## Run as a Background Service (LaunchAgent)
